@@ -1,0 +1,117 @@
+<!doctype html>
+<!--
+  LINE 連携の実験ページ（公開の HTTPS に置くのはこの 1 枚だけ）。製品には入らない。
+  秘密の情報は入っていない。LIFF ID は公開される値。
+  下の LIFF_ID を、LINE Developers で発行された値に置き換えてから置く。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>LAN雀卓 LINE 実験</title>
+<style>
+  body { margin: 0; padding: 16px; background: #181008; color: #f0e4c8; font: 16px/1.6 sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  dl { margin: 0 0 16px; padding: 12px; background: #2a1b0c; border-radius: 8px; }
+  dt { font-size: 13px; color: #c0a878; }
+  dd { margin: 0 0 8px; overflow-wrap: anywhere; }
+  button { display: block; width: 100%; min-height: 52px; margin: 0 0 12px; border: 0; border-radius: 8px;
+           background: #e8c574; color: #23170a; font: 700 16px sans-serif; }
+  button:disabled { opacity: .45; }
+  .note { font-size: 13px; color: #c0a878; margin: -6px 0 16px; }
+  .ng { color: #ff9a8e; }
+</style>
+</head>
+<body>
+<h1>LINE 連携の実験</h1>
+<dl>
+  <dt>状態</dt><dd id="status">読み込み中…</dd>
+  <dt>開いている場所</dt><dd id="where">-</dd>
+  <dt>本人確認のトークン</dt><dd id="token">-</dd>
+  <dt>行き先（PC）</dt><dd id="target">-</dd>
+  <dt>ページ内通信の試験</dt><dd id="fetch-result">未実施</dd>
+</dl>
+<button id="go-inline" type="button" disabled>試験 A：LINE の中のまま PC へ移る</button>
+<p class="note">同じ画面で LAN のページへ移れるかを試します。</p>
+<button id="go-external" type="button" disabled>試験 B：外部のブラウザで PC へ移る</button>
+<p class="note">Safari や Chrome が開くかを試します。</p>
+<button id="try-fetch" type="button" disabled>試験 C：ページを移らずに PC と通信する</button>
+<p class="note">届かない見込みの試験です。届くかどうかを記録します。</p>
+
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script>
+'use strict';
+const LIFF_ID = '2012445492-XcnXbIFP';
+
+/* probe-validate:start */
+// 行き先はプライベート IP だけ。リンクを細工して本人確認のトークンを外へ送らせないため。
+function isPrivateIPv4(host) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(host));
+  if (!m) return false;
+  const n = m.slice(1).map(Number);
+  if (n.some((v) => v > 255)) return false;
+  return n[0] === 10 || (n[0] === 192 && n[1] === 168) || (n[0] === 172 && n[1] >= 16 && n[1] <= 31);
+}
+function readTarget(params) {
+  const host = params.get('h');
+  const port = Number(params.get('p'));
+  const code = params.get('c');
+  if (!isPrivateIPv4(host)) return null;
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  if (!/^[0-9a-f]{12}$/.test(String(code))) return null;
+  return { origin: 'http://' + host + ':' + port, code };
+}
+/* probe-validate:end */
+
+const byId = (id) => document.getElementById(id);
+function fail(message) {
+  byId('status').textContent = message;
+  byId('status').className = 'ng';
+}
+
+async function main() {
+  if (typeof liff === 'undefined') return fail('LINE の部品を読み込めませんでした。インターネット接続を確かめてください。');
+  try {
+    await liff.init({ liffId: LIFF_ID, withLoginOnExternalBrowser: true });
+  } catch (error) {
+    return fail('初期化に失敗：' + String(error && error.message || error));
+  }
+  byId('where').textContent = (liff.isInClient() ? 'LINE の中' : '外部のブラウザ') + ' / ' + liff.getOS();
+
+  const target = readTarget(new URLSearchParams(location.search));
+  if (!target) return fail('リンクの行き先が正しくありません（プライベート IP のみ）。');
+  byId('target').textContent = target.origin;
+
+  const idToken = liff.getIDToken();
+  byId('token').textContent = idToken ? '取得できた（' + idToken.length + ' 文字）' : '取得できない';
+  if (!idToken) return fail('本人確認のトークンを取得できませんでした。openid の権限を確かめてください。');
+  byId('status').textContent = '準備できました。試験を選んでください。';
+
+  const landing = (route) => target.origin + '/lan.html#'
+    + new URLSearchParams({ t: idToken, c: target.code, r: route }).toString();
+
+  byId('go-inline').disabled = false;
+  byId('go-inline').addEventListener('click', () => { location.href = landing('A-inline'); });
+  byId('go-external').disabled = false;
+  byId('go-external').addEventListener('click', () => { liff.openWindow({ url: landing('B-external'), external: true }); });
+  byId('try-fetch').disabled = false;
+  byId('try-fetch').addEventListener('click', async () => {
+    byId('fetch-result').textContent = '試験中…';
+    const timer = new AbortController();
+    const stop = setTimeout(() => timer.abort(), 5000);
+    try {
+      // トークンは送らない。届いたかだけを PC の画面で確かめる。
+      await fetch(target.origin + '/api/ping?c=' + target.code, { mode: 'no-cors', signal: timer.signal });
+      byId('fetch-result').textContent = 'エラーなし（PC の画面に「試験 C 到達」が出たかを見てください）';
+    } catch (error) {
+      byId('fetch-result').textContent = 'ブロックされた：' + String(error && error.name || error);
+    } finally {
+      clearTimeout(stop);
+    }
+  });
+}
+main();
+</script>
+</body>
+</html>
